@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <title>RX-7 FD3S - 多元車流版</title>
+    <style>
+        body { margin: 0; background: #050505; display: flex; justify-content: center; align-items: center; height: 100vh; color: #fff; font-family: "Microsoft JhengHei", sans-serif; overflow: hidden; }
+        #wrapper { position: relative; border: 4px solid #222; box-shadow: 0 0 30px rgba(0,0,0,0.5); }
+        canvas { display: block; image-rendering: pixelated; background: #1a1a1a; }
+        .hud { position: absolute; top: 15px; width: 100%; display: flex; justify-content: space-around; pointer-events: none; z-index: 10; font-weight: bold; font-size: 18px; text-shadow: 0 0 5px #000; }
+        #nitroBox { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); width: 220px; height: 12px; background: rgba(255,255,255,0.05); border: 1px solid #333; border-radius: 6px; }
+        #nitroFill { width: 100%; height: 100%; background: linear-gradient(90deg, #0066ff, #00f2ff); border-radius: 6px; box-shadow: 0 0 15px #00f2ff; transition: width 0.1s; }
+        #gameOver { position: absolute; inset: 0; background: rgba(0,0,0,0.92); display: none; flex-direction: column; justify-content: center; align-items: center; z-index: 30; }
+        button { background: #ffcc00; border: none; padding: 12px 30px; font-weight: bold; cursor: pointer; border-radius: 4px; font-size: 18px; }
+    </style>
+</head>
+<body>
+
+<div id="wrapper">
+    <canvas id="gameCanvas" width="400" height="600"></canvas>
+    <div id="nitroBox"><div id="nitroFill"></div></div>
+    <div class="hud">
+        <div>STAGE: <span id="stageVal">1</span></div>
+        <div style="color:#ffcc00"><span id="speedVal">0</span> KM/H</div>
+    </div>
+    <div id="gameOver">
+        <h2 style="color:#ffcc00; font-size: 40px; margin-bottom: 20px;">任務失敗</h2>
+        <button onclick="location.reload()">重新挑戰</button>
+    </div>
+</div>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    let speed = 8, bgOffset = 0, gameActive = true;
+    let traffic = [];
+    let stage = 1, distance = 0, goal = 3500;
+    
+    // 玩家 RX-7 (黃)
+    const player = { x: 175, y: 480, w: 42, h: 78, vx: 0, tilt: 0, nitro: 100 };
+    const lanes = [75, 180, 285];
+    let keys = {};
+
+    window.addEventListener('keydown', e => {
+        keys[e.key.toLowerCase()] = true;
+        if (e.code === "Space") e.preventDefault();
+    });
+    window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+    // --- 敵車資料庫 (不同的樣式與行為) ---
+    const trafficTypes = {
+        nsx:   { colorMain: '#cc3333', colorDeep: '#660000', w: 40, h: 50, speedMod: -3, changeProb: 0.005, isTruck: false }, // 標準紅
+        truck: { colorMain: '#888888', colorDeep: '#444444', w: 50, h: 100, speedMod: -5, changeProb: 0,     isTruck: true  }, // 卡車慢且寬
+        eg6:   { colorMain: '#33cc33', colorDeep: '#006600', w: 38, h: 46, speedMod: 0,  changeProb: 0.02,  isTruck: false }, // 鋼砲快且躁動
+        ls400: { colorMain: '#ffffff', colorDeep: '#cccccc', w: 42, h: 54, speedMod: -4, changeProb: 0.001, isTruck: false } // 房車穩健
+    };
+
+    function drawCar(x, y, isPlayer, tObj = null) {
+        ctx.save();
+        if(isPlayer) {
+            // 玩家 RX-7 邏輯保留
+            if(keys[' '] && player.nitro > 0) ctx.translate(Math.random()*2-1, Math.random()*2-1);
+            ctx.translate(x + player.w/2, y + player.h/2);
+            ctx.rotate(player.tilt);
+            ctx.translate(-(x + player.w/2), -(y + player.h/2));
+            ctx.fillStyle = '#ccaa00'; ctx.fillRect(x+5, y+10, 32, 55); 
+            ctx.fillStyle = '#ffdd00'; ctx.fillRect(x+7, y+12, 28, 51);
+            ctx.fillStyle = '#111'; ctx.fillRect(x+10, y+24, 22, 18);
+            ctx.fillStyle = keys[' '] ? '#00f2ff' : '#600'; ctx.fillRect(x+5, y+62, 8, 3); ctx.fillRect(x+29, y+62, 8, 3); // 尾燈
+        } else if (tObj) {
+            // --- 敵車繪製 (根據類型) ---
+            const type = trafficTypes[tObj.type];
+            ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.fillRect(x+5, y+15, type.w, type.h); // 影子
+
+            // 車體漸層
+            ctx.fillStyle = type.colorDeep; ctx.fillRect(x, y+10, type.w, type.h); 
+            ctx.fillStyle = type.colorMain; ctx.fillRect(x+2, y+12, type.w-4, type.h-4);
+            ctx.fillStyle = '#111'; ctx.fillRect(x+type.w*0.1, y+type.h*0.2, type.w*0.8, type.h*0.25); // Window
+
+            if (type.isTruck) {
+                // 卡車細節 (貨櫃紋路)
+                ctx.fillStyle = 'rgba(0,0,0,0.2)';
+                for(let i=0; i<3; i++) ctx.fillRect(x+5, y+40+i*20, type.w-10, 4);
+            }
+
+            // 方向燈預警
+            if (tObj.isChanging) {
+                const blink = Math.floor(Date.now() / 150) % 2 === 0;
+                if (blink) {
+                    ctx.fillStyle = '#ff9900';
+                    if (tObj.targetX < tObj.x) ctx.fillRect(x-2, y+15, 6, 8); // 左閃
+                    else ctx.fillRect(x+type.w, y+15, 6, 8); // 右閃
+                }
+            }
+        }
+        ctx.restore();
+    }
+
+    function update() {
+        if (!gameActive) return;
+
+        // 速度與氮氣
+        let nitroOn = keys[' '] && player.nitro > 0;
+        if (nitroOn) { speed = Math.min(speed + 0.2, 26); player.nitro -= 0.6; }
+        else { speed = Math.max(8 + stage, speed - 0.1); if (player.nitro < 100) player.nitro += 0.2; }
+        
+        distance += speed; bgOffset += speed;
+        document.getElementById('nitroFill').style.width = player.nitro + "%";
+
+        // 玩家移動
+        if ((keys['a'] || keys['arrowleft']) && player.x > 55) player.vx -= 1.3;
+        if ((keys['d'] || keys['arrowright']) && player.x < 305) player.vx += 1.3;
+        player.vx *= 0.84; player.x += player.vx;
+        player.tilt = player.vx * 0.045;
+
+        // 生成敵車 (隨機選擇類型)
+        if(Math.random() < 0.015 + (stage * 0.005)) {
+            const typeKeys = Object.keys(trafficTypes);
+            const chosenType = typeKeys[Math.floor(Math.random() * typeKeys.length)];
+            const typeData = trafficTypes[chosenType];
+            
+            traffic.push({ 
+                type: chosenType,
+                x: lanes[Math.floor(Math.random()*3)], y: -typeData.h - 50, // 根據高度調整生成點
+                targetX: null, isChanging: false, changeTimer: 0 
+            });
+        }
+
+        traffic.forEach((t) => {
+            const type = trafficTypes[t.type];
+            t.y += speed + type.speedMod; // 不同車速
+
+            // AI 變道邏輯 (根據車輛性格)
+            if (type.changeProb > 0 && !t.isChanging && Math.random() < type.changeProb * stage) {
+                let possibleLanes = lanes.filter(l => l !== t.x);
+                t.targetX = possibleLanes[Math.floor(Math.random() * possibleLanes.length)];
+                t.isChanging = true;
+                t.changeTimer = 40; // 預警時間
+            }
+
+            if (t.isChanging) {
+                if (t.changeTimer > 0) t.changeTimer--;
+                else {
+                    t.x += (t.targetX - t.x) * 0.1; // 開始移動
+                    if (Math.abs(t.x - t.targetX) < 1) { t.x = t.targetX; t.isChanging = false; }
+                }
+            }
+
+            // 碰撞檢測 (根據不同車輛的 Hitbox)
+            if (Math.abs(player.x - t.x) < 32 + (type.w/4) && Math.abs(player.y - t.y) < 58 + (type.h/4)) gameActive = false;
+        });
+
+        traffic = traffic.filter(t => t.y < 700);
+        if (gameActive) {
+            document.getElementById('speedVal').innerText = Math.floor(speed * 12);
+            render();
+            requestAnimationFrame(update);
+        } else {
+            document.getElementById('gameOver').style.display = 'flex';
+        }
+    }
+
+    function render() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#252525'; ctx.fillRect(50, 0, 300, 600); 
+        ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.setLineDash([40, 40]);
+        ctx.lineDashOffset = -bgOffset; ctx.beginPath();
+        ctx.moveTo(150, 0); ctx.lineTo(150, 600); ctx.moveTo(250, 0); ctx.lineTo(250, 600); ctx.stroke();
+        traffic.forEach(t => drawCar(t.x, t.y, false, t));
+        drawCar(player.x, player.y, true);
+    }
+    update();
+</script>
+</body>
+</html>
